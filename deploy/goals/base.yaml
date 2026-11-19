@@ -1,0 +1,50 @@
+# Shared pieces: the repository the agents work in, the credentials, and a daily cost cap
+# per agent. Replace every REPLACE-ME before applying.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: goal-agents
+type: Opaque
+stringData:
+  ANTHROPIC_API_KEY: "sk-ant-REPLACE-ME"
+  GITHUB_TOKEN: "ghp_REPLACE-ME"        # repo scope: clone, push branches, open PRs
+  LINEAR_API_KEY: "lin_api_REPLACE-ME"  # read projects and issues, write comments, issues, status updates
+  SLACK_BOT_TOKEN: "xoxb-REPLACE-ME"    # chat:write, for the scoreboard and verifier
+---
+apiVersion: kelos.dev/v1alpha2
+kind: Workspace
+metadata:
+  name: app-repo
+spec:
+  repo: https://github.com/your-org/your-repo.git  # the repo that holds tools/goals/
+  ref: main
+  secretRef:
+    name: goal-agents
+---
+# A spawner's Tasks carry the label kelos.dev/taskspawner: <spawner name>, so each
+# budget caps one agent. Kelos stops creating Tasks for the day once a cap is spent.
+apiVersion: kelos.dev/v1alpha2
+kind: TaskBudget
+metadata:
+  name: goal-planner
+spec:
+  taskSelector:
+    matchLabels:
+      kelos.dev/taskspawner: goal-planner
+  period:
+    type: Daily
+    timezone: UTC
+  maxCostUSD: "20"
+---
+apiVersion: kelos.dev/v1alpha2
+kind: TaskBudget
+metadata:
+  name: goal-executor
+spec:
+  taskSelector:
+    matchLabels:
+      kelos.dev/taskspawner: goal-executor
+  period:
+    type: Daily
+    timezone: UTC
+  maxCostUSD: "100"

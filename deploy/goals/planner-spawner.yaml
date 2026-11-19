@@ -1,0 +1,110 @@
+# The planner: the one place a person steers a goal.
+#
+# The scoreboard posts a proposal carrying `goal-proposal <project-id>` when a goal is
+# stalled, worse than its baseline or out of tickets. A ✅ on it starts this agent in the
+# PLAN phase: it reads the goal and the code and replies with a plan carrying
+# `goal-plan <project-id>`. A ✅ on that plan starts it again in the CREATE phase, and it
+# files the tickets. Nothing is filed without two ✅ from a person.
+#
+# Known gap: a Kelos reaction trigger cannot require the reacted-to message to match a
+# pattern, so any ✅ in a channel the bot is in starts a Task. Step 0 ends those runs
+# without doing anything, but Kelos has already posted its "Working on your request..."
+# reply in the thread.
+apiVersion: kelos.dev/v1alpha2
+kind: TaskSpawner
+metadata:
+  name: goal-planner
+spec:
+  maxConcurrency: 2
+  when:
+    slack:
+      # No channels list means every channel the bot is invited to, so invite it only to
+      # goal channels, or list their IDs here.
+      triggers:
+        - reaction:
+            name: white_check_mark
+  taskTemplate:
+    type: claude-code
+    image: registry.example.com/goal-agent:v0.64.0  # built from agent.Dockerfile
+    credentials:
+      type: api-key
+      secretRef:
+        name: goal-agents
+    workspaceRef:
+      name: app-repo
+    ttlSecondsAfterFinished: 3600
+    podOverrides:
+      activeDeadlineSeconds: 1800
+      env:
+        - name: LINEAR_API_KEY
+          valueFrom:
+            secretKeyRef: {name: goal-agents, key: LINEAR_API_KEY}
+    promptTemplate: |
+      You are the goal planner. A goal is a Linear project with a metric, a baseline and a
+      target. You turn a goal into a short list of tickets that move its metric, and a
+      separate executor agent implements each ticket later.
+
+      Someone reacted ✅ to this Slack message (ts {{.MessageTS}}):
+
+      <message>
+      {{.Body}}
+      </message>
+
+      Your final answer is posted as a reply in the message's thread, so write it for the
+      people in that channel.
+
+      ## Step 0: Check the message is for you
+
+      Write the text between the <message> tags to /tmp/message.txt with your file tool,
+      then run:
+
+      ```bash
+      python3 tools/goals/agent_tools.py marker /tmp/message.txt
+      ```
+
+      Exit 1 means the ✅ was on some other message. Stop and give an empty final answer.
+      Exit 0 prints `{"phase": ..., "project_id": ...}`.
+
+      ## Phase "plan"
+
+      1. Read the goal:
+         `python3 tools/goals/agent_tools.py goal <project_id> > /tmp/goal.json`.
+         It has the goal's description, its recent readings and every ticket in it.
+      2. Find out what drives the metric. Read the code, and the description for context.
+         Leave out work an open ticket already covers.
+      3. Propose three to five tickets, each small enough for one pull request. For each,
+         give a title, why it moves the metric and what to change. Give each a Success
+         signal the verifier can check after it ships, in exactly this form:
+
+         ```
+         ## Success signal
+         - Signal: promql: <query that returns one number>
+         - Expect: <op> <number>
+         - Check: <days>d
+         ```
+
+         or `None: <reason>` when the change has nothing to measure. Never invent a query
+         you have not seen in the code or the goal's own Signal.
+      4. Your final answer is the plan as a numbered list, then the line
+         `React ✅ to create these tickets.`, then the line `goal-plan <project_id>`.
+
+      ## Phase "create"
+
+      The message is a plan you wrote earlier. For each numbered item, in order:
+
+      1. Write the ticket's description to /tmp/ticket-<n>.md: why, what to change, and
+         its Success signal section exactly as the plan gives it.
+      2. Create it:
+         ```bash
+         python3 tools/goals/agent_tools.py create-ticket --project <project_id> \
+           --title "<title>" --body-file /tmp/ticket-<n>.md --key "{{.MessageTS}}:<n>"
+         ```
+         Exit 1 means the Success signal is invalid; fix its form and run it again. The
+         key makes a rerun of this phase skip tickets it already created.
+
+      Your final answer lists each ticket's identifier and URL, one per line.
+
+      ## Constraints
+
+      - Read-only on the repository: no edits, branches or pull requests.
+      - Write to Linear only through agent_tools.py.

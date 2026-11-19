@@ -1,0 +1,69 @@
+# The executor: one ticket in, one pull request out.
+#
+# The scoreboard dispatches a ticket by moving it to In Progress and commenting
+# `/execute` on it. Linear sends the comment to Kelos's webhook server, which starts one
+# Task per comment. Point a Linear webhook for Comment events at
+# https://<kelos-webhook-host>/webhook/linear-comment. Generic webhook deliveries are not
+# signature-verified, so keep that endpoint reachable from Linear only.
+#
+# The branch is per ticket, so Kelos runs at most one Task per ticket at a time.
+apiVersion: kelos.dev/v1alpha2
+kind: TaskSpawner
+metadata:
+  name: goal-executor
+spec:
+  maxConcurrency: 4
+  when:
+    webhook:
+      source: linear-comment
+      fieldMapping:
+        id: "$.data.id"
+        body: "$.data.body"
+        title: "$.data.issue.title"
+        url: "$.data.issue.url"
+        issueIdentifier: "$.data.issue.identifier"
+      filters:
+        - field: "$.action"
+          value: "create"
+        - field: "$.data.body"
+          pattern: "^/execute\\s*$"
+  taskTemplate:
+    type: claude-code
+    image: registry.example.com/goal-agent:v0.64.0  # built from agent.Dockerfile
+    credentials:
+      type: api-key
+      secretRef:
+        name: goal-agents
+    workspaceRef:
+      name: app-repo
+    branch: "goal/{{.issueIdentifier}}"
+    ttlSecondsAfterFinished: 3600
+    podOverrides:
+      activeDeadlineSeconds: 5400
+      env:
+        - name: LINEAR_API_KEY
+          valueFrom:
+            secretKeyRef: {name: goal-agents, key: LINEAR_API_KEY}
+    promptTemplate: |
+      You are the goal executor. Implement Linear ticket {{.issueIdentifier}} ({{.title}},
+      {{.url}}) and open one pull request for it. You are on branch
+      goal/{{.issueIdentifier}}.
+
+      1. Read the ticket:
+         `python3 tools/goals/agent_tools.py issue {{.issueIdentifier}}`.
+         Its description says what to change. Its Success signal says how the change will
+         be judged after it ships, so aim the change at that number.
+      2. If the branch already has commits, a run before you was interrupted. Continue
+         from them rather than starting over.
+      3. Make the smallest change that does what the ticket asks. Add or update tests for
+         it and run the tests that cover the files you changed.
+      4. If the ticket needs no change (it is already fixed, or what it describes is gone),
+         write the evidence to /tmp/comment.md, post it with
+         `python3 tools/goals/agent_tools.py comment {{.issueIdentifier}} --body-file /tmp/comment.md`,
+         and stop. A person decides what happens to the ticket.
+      5. Commit, push the branch and open a pull request with `gh pr create`. The body's
+         first line is `Closes {{.issueIdentifier}}`, so the ticket closes when it merges.
+         Then explain what changed and how you tested it.
+      6. Post the pull request URL on the ticket the same way as in step 4.
+
+      Never merge, never push to main, and never work on another ticket.
